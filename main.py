@@ -1,10 +1,10 @@
 # Main function to generate the post and post it
-import sys
-sys.stdout.reconfigure(encoding='utf-8')
-
 from config import llm_token, prompt, bluesky_username, bluesky_password
 import anthropic
 from atproto import Client, client_utils
+
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 
 # Using claude.ia, this function generates a post for the blog.
 def generate_text():
