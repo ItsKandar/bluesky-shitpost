@@ -1,5 +1,5 @@
 # Main function to generate the post and post it
-from config import llm_token, prompt, bluesky_username, bluesky_password, discord_token
+from config import llm_token, system, bluesky_username, bluesky_password, discord_token
 import anthropic
 from atproto import Client, client_utils
 import random
@@ -24,7 +24,7 @@ def generate_text(prompt=None):
     message = client.messages.create(
         max_tokens=130,
         model="claude-3-5-sonnet-20241022",
-        system=prompt,
+        system=system,
         temperature=0.8,
         messages=[
             {
@@ -54,6 +54,32 @@ def postonblue(text):
     client.like(post.uri, post.cid)
     print('Posted:', post.uri)
     return post
+
+def generateanswer(prompt):
+    client = anthropic.Anthropic(api_key=llm_token)
+    message = client.messages.create(
+        max_tokens=130,
+        model="claude-3-5-sonnet-20241022",
+        system=system,
+        temperature=0.8,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text", "text": "Genere une reponse shitpost de 130 characteres max au bluesky suivant: " + prompt
+                    }
+                ]
+            }
+        ]
+    )
+    content = message.content
+    text = " ".join(block.text for block in content if block.type == "text")
+    print(text)
+    return text
+
+# generateanswer(posttoanswer)
+# generate_text()
 
 # Initialize discord bot
 intents = discord.Intents.default()
@@ -85,8 +111,9 @@ class ShitpostView(discord.ui.View):
 
     @discord.ui.button(label='Oui', style=discord.ButtonStyle.green)
     async def confirm(self, interaction: discord.Interaction, button: Button):
-        post = postonblue(self.text)
-        await interaction.response.send_message(f'Message posté sur bluesky! Voici le lien: {post.uri}')
+        postonblue(self.text)
+        await asyncio.sleep(5)
+        await interaction.response.send_message('Message posté sur bluesky!')
         self.stop()
 
     @discord.ui.button(label='Non', style=discord.ButtonStyle.red)
@@ -98,6 +125,8 @@ class ShitpostView(discord.ui.View):
 async def shitpost(interaction: discord.Interaction, user_prompt: str):
     text = generate_text(user_prompt)
     await interaction.response.send_message(text)
+    # Wait a moment to ensure the first message is sent
+    await asyncio.sleep(5)
     view = ShitpostView(text)
     await interaction.followup.send('Voulez-vous poster ce message sur bluesky?', view=view)
         
