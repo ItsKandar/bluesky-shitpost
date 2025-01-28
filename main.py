@@ -129,6 +129,11 @@ async def shitpost(interaction: discord.Interaction, user_prompt: str):
     await asyncio.sleep(5)
     view = ShitpostView(text)
     await interaction.followup.send('Voulez-vous poster ce message sur bluesky?', view=view)
+    
+@bot.tree.command(name='answer', description='Génère une réponse à un post bluesky')
+async def answer(interaction: discord.Interaction, posttoanswer: str):
+    text = generateanswer(posttoanswer)
+    await interaction.response.send_message(text)
         
 # Commande d'arret du bot
 @bot.tree.command(name='stop', description='Arrête le bot')
