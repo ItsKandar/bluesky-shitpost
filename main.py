@@ -23,7 +23,7 @@ def generate_text(prompt=None):
     client = anthropic.Anthropic(api_key=llm_token)
     message = client.messages.create(
         max_tokens=130,
-        model="claude-3-5-sonnet-20241022",
+        model="claude-haiku-4-5",
         system=system,
         temperature=0.8,
         messages=[
@@ -59,7 +59,7 @@ def generateanswer(prompt):
     client = anthropic.Anthropic(api_key=llm_token)
     message = client.messages.create(
         max_tokens=130,
-        model="claude-3-5-sonnet-20241022",
+        model="claude-haiku-4-5",
         system=system,
         temperature=0.8,
         messages=[
