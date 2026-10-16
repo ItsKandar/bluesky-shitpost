@@ -92,6 +92,26 @@ def image_article(article, max_octets=950_000):
     return None
 
 
+def texte_article(article, max_car=12000):
+    """Texte de l'article (paragraphes de la page), tronqué à max_car, ou "" si inaccessible
+    (paywall, robots refusés : on se contente alors du résumé du flux)."""
+    try:
+        r = requests.get(article["lien"], headers=ENTETES, timeout=10)
+        if not r.ok:
+            return ""
+        page = re.sub(r"<(script|style|noscript)[^>]*>.*?</\1>", " ", r.text, flags=re.S | re.I)
+        m = re.search(r"<article[^>]*>(.*?)</article>", page, re.S)
+        corps = m.group(1) if m else page
+        paragraphes = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", p))).strip()
+                       for p in re.findall(r"<p[^>]*>(.*?)</p>", corps, re.S)]
+        texte = "\n".join(p for p in paragraphes if len(p) > 60)
+    except Exception as e:
+        print(f"[actu] article illisible : {e}")
+        return ""
+    # Moins long que le résumé : page vide ou réservée aux abonnés
+    return texte[:max_car] if len(texte) > len(article.get("resume", "")) + 200 else ""
+
+
 def _acceptable(titre, resume):
     bas = f"{titre} {resume}".lower()
     return not any(mot in bas for mot in MOTS_EXCLUS)

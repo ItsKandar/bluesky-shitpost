@@ -102,10 +102,13 @@ CONSIGNE_ANALYSE = (
     "ou de force ça révèle, ce que le discours dominant ou le spectacle cache.\n"
     "- post : un shitpost de 280 caractères maximum qui fait passer CETTE analyse : la blague sert "
     "l'argument, le lecteur doit comprendre ta critique. Ton brainrot habituel, second degré. "
-    "N'invente ni faits, ni chiffres, ni citations ; ne prête pas de fausses répliques à des "
-    "personnes réelles ; pas de lien, pas de hashtag.\n"
-    "- passe : true seulement si le sujet est tragique, violent ou touche des victimes "
-    "(analyse et post vides dans ce cas), sinon false."
+    "N'invente ni faits, ni chiffres, ni citations : les guillemets « » sont réservés aux "
+    "citations exactes, mot pour mot, présentes dans l'article. Ne prête pas de fausses répliques "
+    "à des personnes réelles ; pas de lien, pas de hashtag.\n"
+    "- passe : true seulement si le sujet principal est un drame humain (décès, attentat, "
+    "catastrophe, agression d'une personne, violences sexuelles) : analyse et post vides dans ce "
+    "cas. La répression policière, les luttes sociales, les conflits politiques et les guerres vus "
+    "sous l'angle politique ne sont PAS des raisons de passer : c'est ton sujet. Sinon false."
 )
 
 # Réponse en JSON contraint par l'API (structured outputs) : analyse et post toujours séparés
@@ -197,11 +200,16 @@ def generate_text(prompt=None, derniers_posts=None, avec_analyse=False, format_p
 
 def generate_actu(article, derniers_posts=None, format_post=None, dernier_format=None):
     """(post, analyse) sur un article, ou (None, None) si le sujet ne s'y prête pas."""
+    texte = actu.texte_article(article)
     sujet = (
-        "Voici un titre d'actualité du jour, réagis-y :\n"
-        f"Titre : {article['titre']}\n"
+        "Voici un article d'actualité, réagis-y :\n"
+        f"Titre : {article['titre']} ({article['source']})\n"
         f"Résumé : {article['resume']}"
     )
+    if texte:
+        sujet += (f"\n\nTexte de l'article :\n{texte}\n\n"
+                  "Appuie-toi sur le contenu de l'article (ses arguments, ses faits précis, ce qui est "
+                  "révélateur ou absurde) plutôt que sur le seul titre, et choisis l'angle le plus percutant.")
     post, analyse = _post_avec_analyse(sujet, derniers_posts, passe_possible=True,
                                        format_post=format_post, dernier_format=dernier_format)
     return post, analyse
