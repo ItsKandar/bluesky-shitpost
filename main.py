@@ -2,7 +2,7 @@
 import config
 from config import llm_token, system, bluesky_username, bluesky_password, discord_token
 import anthropic
-from atproto import Client
+from atproto import Client, models
 import random
 import discord
 from discord import Button
@@ -208,13 +208,27 @@ def generate_actu(article, derniers_posts=None, format_post=None, dernier_format
 
 
 # Function to post on bluesky
-def postonblue(text):
+def carte_lien(client, article):
+    """Carte de lien Bluesky (titre, résumé, image) vers l'article."""
+    image = actu.image_article(article)
+    vignette = client.upload_blob(image).blob if image else None
+    return models.AppBskyEmbedExternal.Main(external=models.AppBskyEmbedExternal.External(
+        uri=article["lien"], title=article["titre"][:300], description=article["resume"][:300], thumb=vignette))
+
+
+def postonblue(text, article=None):
     client = Client()
     profile = client.login(bluesky_username, bluesky_password)
     print('Profile:', profile.display_name)
 
-    # Post the message
-    post = client.send_post(text=text)
+    # Post the message (avec la carte de l'article pour les posts d'actualité)
+    embed = None
+    if article:
+        try:
+            embed = carte_lien(client, article)
+        except Exception as e:
+            print(f"[bluesky] carte de lien impossible : {e}")
+    post = client.send_post(text=text, embed=embed, langs=["fr"])
     client.like(post.uri, post.cid)
     print('Posted:', post.uri)
     return post
@@ -298,7 +312,7 @@ class SuppressionView(discord.ui.View):
 
 async def publier(text, article=None, origine="auto", analyse=None):
     """Publie sur Bluesky, mémorise le post et le recopie dans le salon de suivi."""
-    post = await asyncio.to_thread(postonblue, text)
+    post = await asyncio.to_thread(postonblue, text, article)
     etat = charger_etat()
     etat["derniers_posts"] = (etat["derniers_posts"] + [text])[-15:]
     etat["liens_vus"] = etat["liens_vus"][-300:]

@@ -48,6 +48,34 @@ def _date(item):
             return None
 
 
+def _image_rss(item):
+    for el in item.iter():
+        url = el.get("url") or ""
+        if el.tag.endswith(("content", "thumbnail", "enclosure")) and url.startswith("http"):
+            if el.get("type", "image").startswith("image") or el.get("medium") == "image":
+                return url
+    return None
+
+
+def image_article(article, max_octets=950_000):
+    """Image de l'article (flux RSS, sinon balise og:image de la page), en octets, ou None."""
+    url = article.get("image")
+    try:
+        if not url:
+            page = requests.get(article["lien"], headers=ENTETES, timeout=10).text
+            m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', page) or \
+                re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image', page)
+            url = html.unescape(m.group(1)) if m else None
+        if not url:
+            return None
+        r = requests.get(url, headers=ENTETES, timeout=10)
+        if r.ok and r.headers.get("content-type", "").startswith("image") and len(r.content) <= max_octets:
+            return r.content
+    except Exception as e:
+        print(f"[actu] image indisponible : {e}")
+    return None
+
+
 def _acceptable(titre, resume):
     bas = f"{titre} {resume}".lower()
     return not any(mot in bas for mot in MOTS_EXCLUS)
@@ -75,6 +103,7 @@ def articles_recents(deja_vus, heures=24):
                 continue
             if not _acceptable(titre, resume):
                 continue
-            articles.append({"source": source, "titre": titre, "resume": resume, "lien": lien})
+            articles.append({"source": source, "titre": titre, "resume": resume, "lien": lien,
+                             "image": _image_rss(item)})
     random.shuffle(articles)
     return articles
