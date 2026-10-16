@@ -71,7 +71,7 @@ def planifier(jour):
 # --- Génération --------------------------------------------------------------
 def _demander(consigne, derniers_posts=None, max_tokens=300):
     if derniers_posts:
-        consigne += "\n\nTes derniers posts (ne te répète pas, change de blague et de tournure) :\n" + \
+        consigne += "\n\nTes derniers posts, pour ne pas refaire les mêmes blagues (ce ne sont pas des modèles à imiter) :\n" + \
             "\n".join(f"- {p}" for p in derniers_posts[-10:])
     client = anthropic.Anthropic(api_key=llm_token)
     message = client.messages.create(
@@ -96,59 +96,114 @@ def _court(text):
 # Le post est précédé d'une courte analyse politique (non publiée) : elle donne un
 # angle au shitpost, et elle est recopiée dans le salon de suivi.
 CONSIGNE_ANALYSE = (
-    "Réponds en deux parties.\n"
-    "<analyse>2 ou 3 phrases : ta lecture politique du sujet depuis ta position (marxiste, "
+    "Réponds avec trois champs.\n"
+    "- analyse : 2 ou 3 phrases, ta lecture politique du sujet depuis ta position (marxiste, "
     "anticapitaliste, debordienne, féministe, queer). À qui ça profite, quel rapport de classe "
-    "ou de force ça révèle, ce que le discours dominant ou le spectacle cache.</analyse>\n"
-    "<post>Un shitpost de 280 caractères maximum qui fait passer CETTE analyse : la blague sert "
-    "l'argument, le lecteur doit comprendre ta critique. Ton brainrot habituel, second degré.</post>\n"
-    "Règles : n'invente ni faits, ni chiffres, ni citations ; ne prête pas de fausses répliques "
-    "à des personnes réelles ; pas de lien, pas de hashtag."
+    "ou de force ça révèle, ce que le discours dominant ou le spectacle cache.\n"
+    "- post : un shitpost de 280 caractères maximum qui fait passer CETTE analyse : la blague sert "
+    "l'argument, le lecteur doit comprendre ta critique. Ton brainrot habituel, second degré. "
+    "N'invente ni faits, ni chiffres, ni citations ; ne prête pas de fausses répliques à des "
+    "personnes réelles ; pas de lien, pas de hashtag.\n"
+    "- passe : true seulement si le sujet est tragique, violent ou touche des victimes "
+    "(analyse et post vides dans ce cas), sinon false."
 )
 
+# Réponse en JSON contraint par l'API (structured outputs) : analyse et post toujours séparés
+SCHEMA_POST = {
+    "type": "object",
+    "properties": {
+        "analyse": {"type": "string"},
+        "post": {"type": "string"},
+        "passe": {"type": "boolean"},
+    },
+    "required": ["analyse", "post", "passe"],
+    "additionalProperties": False,
+}
 
-def _balise(text, nom):
-    m = re.search(rf"<{nom}>(.*?)(?:</{nom}>|$)", text, re.S)
-    return m.group(1).strip() if m else ""
+
+# Format tiré au hasard pour chaque post, toujours différent de celui du post précédent
+# (sans ça, le modèle enchaîne les faux dialogues en imitant ses derniers posts).
+FORMATS = {
+    "phrase": ("une ou deux phrases cinglantes, sans dialogue", 3),
+    "moi_quand": ("un « moi quand… » ou un « POV : … »", 1),
+    "annonce": ("un faux communiqué ou une fausse annonce officielle", 1),
+    "question": ("une question rhétorique qui retourne le discours dominant", 1),
+    "liste": ("une courte liste ou un faux classement", 1),
+    "dialogue": ("un faux dialogue entre institutions ou groupes sociaux (jamais entre personnes réelles nommées)", 0.6),
+}
 
 
-def _post_avec_analyse(sujet, derniers_posts=None, passe_possible=False):
-    """Renvoie (post, analyse), ou (None, None) si le modèle répond PASSE."""
-    consigne = sujet + "\n\n" + CONSIGNE_ANALYSE
-    if passe_possible:
-        consigne += " Si le sujet est tragique, violent ou touche des victimes, réponds uniquement PASSE."
-    post = analyse = ""
+def choisir_format(dernier=None):
+    noms = [n for n in FORMATS if n != dernier]
+    return random.choices(noms, weights=[FORMATS[n][1] for n in noms])[0]
+
+
+def consigne_format(nom, dernier=None):
+    texte = f"\nFormat imposé pour le post : {FORMATS[nom][0]}."
+    if dernier in FORMATS:
+        texte += (f" Ton dernier post était {FORMATS[dernier][0]} : surtout ne reprends ni ce format "
+                  "ni sa structure.")
+    return texte
+
+
+def _demander_post(consigne, derniers_posts=None):
+    if derniers_posts:
+        consigne += "\n\nTes derniers posts, pour ne pas refaire les mêmes blagues (ce ne sont pas des modèles à imiter) :\n" + \
+            "\n".join(f"- {p}" for p in derniers_posts[-10:])
+    client = anthropic.Anthropic(api_key=llm_token)
+    message = client.messages.create(
+        max_tokens=1000,
+        model="claude-haiku-4-5",
+        system=system,
+        extra_body={"temperature": 0.8},
+        output_config={"format": {"type": "json_schema", "schema": SCHEMA_POST}},
+        messages=[{"role": "user", "content": [{"type": "text", "text": consigne}]}]
+    )
+    if message.stop_reason != "end_turn":
+        raise ValueError(f"réponse incomplète ({message.stop_reason})")
+    texte = next(b.text for b in message.content if b.type == "text")
+    return json.loads(texte)
+
+
+def _post_avec_analyse(sujet, derniers_posts=None, passe_possible=False, format_post=None, dernier_format=None):
+    """Renvoie (post, analyse), ou (None, None) si le sujet ne s'y prête pas ou après 3 échecs."""
+    format_post = format_post or choisir_format(dernier_format)
+    consigne = sujet + "\n\n" + CONSIGNE_ANALYSE + consigne_format(format_post, dernier_format)
     for _ in range(3):
-        brut = _demander(consigne, derniers_posts, max_tokens=700)
-        if passe_possible and brut.upper().startswith("PASSE"):
+        try:
+            r = _demander_post(consigne, derniers_posts)
+        except (ValueError, StopIteration) as e:
+            print(f"[génération] réponse inutilisable : {e}")
+            continue
+        if r["passe"] and passe_possible:
             return None, None
-        post, analyse = _balise(brut, "post"), _balise(brut, "analyse")
+        post, analyse = r["post"].strip(), r["analyse"].strip()
         if len(post) > 1 and post[0] in '"«' and post[-1] in '"»':
             post = post[1:-1].strip()
         if _court(post):
-            break
-    print(f"[analyse] {analyse}\n{post}")
-    return post, analyse
+            print(f"[analyse] {analyse}\n{post}")
+            return post, analyse
+    return None, None
 
 
 # Using claude.ia, this function generates a post for the blog.
-def generate_text(prompt=None, derniers_posts=None, avec_analyse=False):
+def generate_text(prompt=None, derniers_posts=None, avec_analyse=False, format_post=None, dernier_format=None):
     if prompt is None:
         prompt = selectprompt()
-    post, analyse = _post_avec_analyse(f"Sujet : tu {prompt}.", derniers_posts)
+    post, analyse = _post_avec_analyse(f"Sujet : tu {prompt}.", derniers_posts,
+                                       format_post=format_post, dernier_format=dernier_format)
     return (post, analyse) if avec_analyse else post
 
 
-def generate_actu(article, derniers_posts=None):
+def generate_actu(article, derniers_posts=None, format_post=None, dernier_format=None):
     """(post, analyse) sur un article, ou (None, None) si le sujet ne s'y prête pas."""
     sujet = (
         "Voici un titre d'actualité du jour, réagis-y :\n"
         f"Titre : {article['titre']}\n"
         f"Résumé : {article['resume']}"
     )
-    post, analyse = _post_avec_analyse(sujet, derniers_posts, passe_possible=True)
-    if not post or not _court(post):
-        return None, None
+    post, analyse = _post_avec_analyse(sujet, derniers_posts, passe_possible=True,
+                                       format_post=format_post, dernier_format=dernier_format)
     return post, analyse
 
 
@@ -204,15 +259,21 @@ def generateanswer(prompt):
 def preparer_post_auto(etat):
     """Choisit le sujet (actualité ou liste fixe), génère (texte, article, analyse)."""
     derniers = etat["derniers_posts"]
+    dernier_format = etat.get("dernier_format")
+    format_post = choisir_format(dernier_format)
+    etat["dernier_format"] = format_post
     if random.random() < PART_ACTU:
         articles = actu.articles_recents(set(etat["liens_vus"]))
         for article in articles[:4]:
             etat["liens_vus"].append(article["lien"])
-            text, analyse = generate_actu(article, derniers)
+            text, analyse = generate_actu(article, derniers, format_post, dernier_format)
             if text:
                 return text, article, analyse
         print("[auto] aucune actualité exploitable, repli sur un sujet fixe")
-    text, analyse = generate_text(derniers_posts=derniers, avec_analyse=True)
+    text, analyse = generate_text(derniers_posts=derniers, avec_analyse=True,
+                                  format_post=format_post, dernier_format=dernier_format)
+    if not text:
+        raise RuntimeError("aucun post utilisable généré")
     return text, None, analyse
 
 
@@ -339,6 +400,9 @@ async def shitpost(interaction: discord.Interaction, user_prompt: str):
         text = await asyncio.to_thread(generate_text, user_prompt)
     except anthropic.APIError as e:
         await interaction.followup.send(f"Génération impossible : {getattr(e, 'message', e)}")
+        return
+    if not text:
+        await interaction.followup.send("Génération impossible : aucun post utilisable, réessaie.")
         return
     await interaction.followup.send(text)
     view = ShitpostView(text)
