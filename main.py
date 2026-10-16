@@ -82,7 +82,10 @@ def _demander(consigne, derniers_posts=None):
         messages=[{"role": "user", "content": [{"type": "text", "text": consigne}]}]
     )
     text = " ".join(block.text for block in message.content if block.type == "text").strip()
-    return text.strip('"« »').strip()
+    # Guillemets autour du post entier seulement (ne pas couper une citation au début)
+    if len(text) > 1 and text[0] in '"«' and text[-1] in '"»':
+        text = text[1:-1].strip()
+    return text
 
 
 def _court(text):
