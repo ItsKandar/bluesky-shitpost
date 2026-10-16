@@ -1,5 +1,6 @@
 # Récupération de l'actualité (flux RSS) pour les posts automatiques
 import html
+import html.entities
 import random
 import re
 import xml.etree.ElementTree as ET
@@ -7,6 +8,12 @@ from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone, timedelta
 
 import requests
+
+# Sources prioritaires : un article pas encore traité, publié depuis moins de N jours,
+# passe avant toute autre actualité.
+PRIORITAIRES = {
+    "Angle Gauche": ("https://anglegauche.fr/rss.php", 14),
+}
 
 FLUX = {
     "franceinfo": "https://www.francetvinfo.fr/titres.rss",
@@ -28,6 +35,15 @@ MOTS_EXCLUS = [
 ]
 
 ENTETES = {"User-Agent": "Mozilla/5.0 (Marguerite, bot Bluesky)"}
+
+
+def _xml_valide(contenu):
+    """Remplace les entités HTML (&nbsp;…) que certains flux mettent à tort dans le XML."""
+    texte = contenu.decode("utf-8", "replace") if isinstance(contenu, bytes) else contenu
+    xml_ok = {"amp", "lt", "gt", "quot", "apos"}
+    return re.sub(r"&([a-zA-Z][a-zA-Z0-9]*);",
+                  lambda m: m.group(0) if m.group(1) in xml_ok or m.group(1) not in html.entities.name2codepoint
+                  else f"&#{html.entities.name2codepoint[m.group(1)]};", texte).encode("utf-8")
 
 
 def _nettoyer(texte):
@@ -81,29 +97,41 @@ def _acceptable(titre, resume):
     return not any(mot in bas for mot in MOTS_EXCLUS)
 
 
-def articles_recents(deja_vus, heures=24):
-    """Articles des dernières `heures`, hors drames et hors liens déjà traités."""
-    limite = datetime.now(timezone.utc) - timedelta(hours=heures)
+def _lire_flux(source, url, deja_vus, limite):
+    try:
+        r = requests.get(url, headers=ENTETES, timeout=10)
+        racine = ET.fromstring(_xml_valide(r.content))
+    except Exception as e:
+        print(f"[actu] flux {source} indisponible : {e}")
+        return []
     articles = []
-    for source, url in FLUX.items():
-        try:
-            r = requests.get(url, headers=ENTETES, timeout=10)
-            racine = ET.fromstring(r.content)
-        except Exception as e:
-            print(f"[actu] flux {source} indisponible : {e}")
+    for item in racine.findall(".//item"):
+        titre = _nettoyer(item.findtext("title"))
+        lien = (item.findtext("link") or "").strip()
+        resume = _nettoyer(item.findtext("description"))[:400]
+        date = _date(item)
+        if not titre or not lien or lien in deja_vus:
             continue
-        for item in racine.findall(".//item"):
-            titre = _nettoyer(item.findtext("title"))
-            lien = (item.findtext("link") or "").strip()
-            resume = _nettoyer(item.findtext("description"))[:400]
-            date = _date(item)
-            if not titre or not lien or lien in deja_vus:
-                continue
-            if date and date.tzinfo and date < limite:
-                continue
-            if not _acceptable(titre, resume):
-                continue
-            articles.append({"source": source, "titre": titre, "resume": resume, "lien": lien,
-                             "image": _image_rss(item)})
-    random.shuffle(articles)
+        if date and date.tzinfo and date < limite:
+            continue
+        if not _acceptable(titre, resume):
+            continue
+        articles.append({"source": source, "titre": titre, "resume": resume, "lien": lien,
+                         "image": _image_rss(item), "date": date})
     return articles
+
+
+def articles_recents(deja_vus, heures=24):
+    """Articles à traiter : d'abord ceux des sources prioritaires (du plus récent au plus
+    ancien), puis les autres flux des dernières `heures` dans un ordre aléatoire.
+    Drames et liens déjà traités sont écartés."""
+    maintenant = datetime.now(timezone.utc)
+    prioritaires = []
+    for source, (url, jours) in PRIORITAIRES.items():
+        prioritaires += _lire_flux(source, url, deja_vus, maintenant - timedelta(days=jours))
+    prioritaires.sort(key=lambda a: a["date"] or maintenant, reverse=True)
+    autres = []
+    for source, url in FLUX.items():
+        autres += _lire_flux(source, url, deja_vus, maintenant - timedelta(hours=heures))
+    random.shuffle(autres)
+    return prioritaires + autres
