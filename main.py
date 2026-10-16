@@ -9,6 +9,7 @@ from discord import Button
 from discord.ext import commands, tasks
 import asyncio
 import json
+import re
 import os
 import sys
 from datetime import datetime, time, timedelta
@@ -68,13 +69,13 @@ def planifier(jour):
 
 
 # --- Génération --------------------------------------------------------------
-def _demander(consigne, derniers_posts=None):
+def _demander(consigne, derniers_posts=None, max_tokens=300):
     if derniers_posts:
         consigne += "\n\nTes derniers posts (ne te répète pas, change de blague et de tournure) :\n" + \
             "\n".join(f"- {p}" for p in derniers_posts[-10:])
     client = anthropic.Anthropic(api_key=llm_token)
     message = client.messages.create(
-        max_tokens=300,
+        max_tokens=max_tokens,
         model="claude-haiku-4-5",
         system=system,
         # SDK anthropic 1.x : temperature n'est plus un argument nommé ; Haiku 4.5 l'accepte encore
@@ -92,39 +93,63 @@ def _court(text):
     return 0 < len(text) <= LIMITE_BLUESKY
 
 
+# Le post est précédé d'une courte analyse politique (non publiée) : elle donne un
+# angle au shitpost, et elle est recopiée dans le salon de suivi.
+CONSIGNE_ANALYSE = (
+    "Réponds en deux parties.\n"
+    "<analyse>2 ou 3 phrases : ta lecture politique du sujet depuis ta position (marxiste, "
+    "anticapitaliste, debordienne, féministe, queer). À qui ça profite, quel rapport de classe "
+    "ou de force ça révèle, ce que le discours dominant ou le spectacle cache.</analyse>\n"
+    "<post>Un shitpost de 280 caractères maximum qui fait passer CETTE analyse : la blague sert "
+    "l'argument, le lecteur doit comprendre ta critique. Ton brainrot habituel, second degré.</post>\n"
+    "Règles : n'invente ni faits, ni chiffres, ni citations ; ne prête pas de fausses répliques "
+    "à des personnes réelles ; pas de lien, pas de hashtag."
+)
+
+
+def _balise(text, nom):
+    m = re.search(rf"<{nom}>(.*?)(?:</{nom}>|$)", text, re.S)
+    return m.group(1).strip() if m else ""
+
+
+def _post_avec_analyse(sujet, derniers_posts=None, passe_possible=False):
+    """Renvoie (post, analyse), ou (None, None) si le modèle répond PASSE."""
+    consigne = sujet + "\n\n" + CONSIGNE_ANALYSE
+    if passe_possible:
+        consigne += " Si le sujet est tragique, violent ou touche des victimes, réponds uniquement PASSE."
+    post = analyse = ""
+    for _ in range(3):
+        brut = _demander(consigne, derniers_posts, max_tokens=700)
+        if passe_possible and brut.upper().startswith("PASSE"):
+            return None, None
+        post, analyse = _balise(brut, "post"), _balise(brut, "analyse")
+        if len(post) > 1 and post[0] in '"«' and post[-1] in '"»':
+            post = post[1:-1].strip()
+        if _court(post):
+            break
+    print(f"[analyse] {analyse}\n{post}")
+    return post, analyse
+
+
 # Using claude.ia, this function generates a post for the blog.
-def generate_text(prompt=None, derniers_posts=None):
+def generate_text(prompt=None, derniers_posts=None, avec_analyse=False):
     if prompt is None:
         prompt = selectprompt()
-    consigne = f"Genere un shitpost de 280 caracteres maximum, quelques phrases ou tu {prompt}"
-    for _ in range(3):
-        text = _demander(consigne, derniers_posts)
-        if _court(text):
-            break
-    print(text)
-    return text
+    post, analyse = _post_avec_analyse(f"Sujet : tu {prompt}.", derniers_posts)
+    return (post, analyse) if avec_analyse else post
 
 
 def generate_actu(article, derniers_posts=None):
-    """Shitpost sur un article. Renvoie None si le sujet ne s'y prête pas."""
-    consigne = (
-        "Voici un titre d'actualité du jour :\n"
+    """(post, analyse) sur un article, ou (None, None) si le sujet ne s'y prête pas."""
+    sujet = (
+        "Voici un titre d'actualité du jour, réagis-y :\n"
         f"Titre : {article['titre']}\n"
-        f"Résumé : {article['resume']}\n\n"
-        "Réagis-y avec un shitpost de 280 caracteres maximum, dans ton style. "
-        "Moque-toi de l'événement tel que décrit, sans inventer de faits, de chiffres ni de citations, "
-        "et sans attribuer à une personne réelle des propos ou des actes qui ne sont pas dans le titre. "
-        "Pas de lien, pas de hashtag. Si le sujet est tragique, violent ou touche des victimes, "
-        "réponds uniquement PASSE."
+        f"Résumé : {article['resume']}"
     )
-    for _ in range(3):
-        text = _demander(consigne, derniers_posts)
-        if text.upper().startswith("PASSE"):
-            return None
-        if _court(text):
-            print(text)
-            return text
-    return None
+    post, analyse = _post_avec_analyse(sujet, derniers_posts, passe_possible=True)
+    if not post or not _court(post):
+        return None, None
+    return post, analyse
 
 
 # Function to post on bluesky
@@ -177,17 +202,18 @@ def generateanswer(prompt):
 
 
 def preparer_post_auto(etat):
-    """Choisit le sujet (actualité ou liste fixe) et génère le texte."""
+    """Choisit le sujet (actualité ou liste fixe), génère (texte, article, analyse)."""
     derniers = etat["derniers_posts"]
     if random.random() < PART_ACTU:
         articles = actu.articles_recents(set(etat["liens_vus"]))
         for article in articles[:4]:
             etat["liens_vus"].append(article["lien"])
-            text = generate_actu(article, derniers)
+            text, analyse = generate_actu(article, derniers)
             if text:
-                return text, article
+                return text, article, analyse
         print("[auto] aucune actualité exploitable, repli sur un sujet fixe")
-    return generate_text(derniers_posts=derniers), None
+    text, analyse = generate_text(derniers_posts=derniers, avec_analyse=True)
+    return text, None, analyse
 
 
 # Initialize discord bot
@@ -209,7 +235,7 @@ class SuppressionView(discord.ui.View):
                                         custom_id=ID_SUPPRIMER + rkey))
 
 
-async def publier(text, article=None, origine="auto"):
+async def publier(text, article=None, origine="auto", analyse=None):
     """Publie sur Bluesky, mémorise le post et le recopie dans le salon de suivi."""
     post = await asyncio.to_thread(postonblue, text)
     etat = charger_etat()
@@ -223,6 +249,8 @@ async def publier(text, article=None, origine="auto"):
         salon = None
     if salon:
         source = f"\n-# Actu : [{article['titre']}](<{article['lien']}>) ({article['source']})" if article else ""
+        if analyse:
+            source += f"\n-# Analyse : {analyse[:600]}"
         await salon.send(f"**Post {origine}** · {lien_post(post.uri)}\n> {text}{source}",
                          view=SuppressionView(post.uri.rsplit('/', 1)[-1]))
     return post
@@ -247,9 +275,9 @@ async def publication_auto():
     etat["faits"].extend(a_faire)
     sauver_etat(etat)
     try:
-        text, article = await asyncio.to_thread(preparer_post_auto, etat)
+        text, article, analyse = await asyncio.to_thread(preparer_post_auto, etat)
         sauver_etat(etat)  # liens d'articles marqués comme vus
-        await publier(text, article)
+        await publier(text, article, analyse=analyse)
     except Exception as e:
         print(f"[auto] échec de la publication de {a_faire[-1]} : {e}")
 
