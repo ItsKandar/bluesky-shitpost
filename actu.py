@@ -27,11 +27,11 @@ FLUX = {
 
 # Sujets écartés d'office : on ne fait pas de shitpost sur un drame
 MOTS_EXCLUS = [
-    "mort", "morts", "décès", "décéd", "tué", "tuée", "tués", "meurtre", "assassin", "attentat",
-    "terroris", "viol", "pédocrimin", "agression sexuelle", "féminicide", "accident", "crash",
-    "incendie", "victime", "otage", "massacre", "génocide", "bombard", "frappe", "suicide",
-    "disparu", "noyé", "séisme", "inondation", "deuil", "obsèques", "funérailles", "hommage",
-    "cancer", "enfant", "bébé", "nécrolog",
+    "mort", "décès", "décédé", "tué", "meurtre", "assassiné", "assassinat", "attentat", "terroriste",
+    "terrorisme", "viol", "violé", "pédocriminel", "pédocriminalité", "agression sexuelle", "féminicide",
+    "accident", "crash", "incendie", "victime", "otage", "massacre", "génocide", "bombardement",
+    "suicide", "disparu", "noyé", "séisme", "inondation", "deuil", "obsèques", "funérailles",
+    "hommage", "cancer", "bébé", "nécrologie",
 ]
 
 ENTETES = {"User-Agent": "Mozilla/5.0 (Marguerite, bot Bluesky)"}
@@ -112,12 +112,15 @@ def texte_article(article, max_car=12000):
     return texte[:max_car] if len(texte) > len(article.get("resume", "")) + 200 else ""
 
 
+# Mots entiers uniquement (« viol » ne doit pas écarter « violence », ni « mort » « mortier »)
+_EXCLUS = re.compile(r"\b(?:" + "|".join(re.escape(m) for m in MOTS_EXCLUS) + r")(?:s|e|es)?\b", re.I)
+
+
 def _acceptable(titre, resume):
-    bas = f"{titre} {resume}".lower()
-    return not any(mot in bas for mot in MOTS_EXCLUS)
+    return not _EXCLUS.search(f"{titre} {resume}")
 
 
-def _lire_flux(source, url, deja_vus, limite):
+def _lire_flux(source, url, deja_vus, limite, filtrer=True):
     try:
         r = requests.get(url, headers=ENTETES, timeout=10)
         racine = ET.fromstring(_xml_valide(r.content))
@@ -134,7 +137,7 @@ def _lire_flux(source, url, deja_vus, limite):
             continue
         if date and date.tzinfo and date < limite:
             continue
-        if not _acceptable(titre, resume):
+        if filtrer and not _acceptable(titre, resume):
             continue
         articles.append({"source": source, "titre": titre, "resume": resume, "lien": lien,
                          "image": _image_rss(item), "date": date})
@@ -148,10 +151,18 @@ def articles_recents(deja_vus, heures=24):
     maintenant = datetime.now(timezone.utc)
     prioritaires = []
     for source, (url, jours) in PRIORITAIRES.items():
-        prioritaires += _lire_flux(source, url, deja_vus, maintenant - timedelta(days=jours))
+        # Pas de filtre par mots-clés : articles politiques, le modèle juge lui-même (« passe »)
+        prioritaires += _lire_flux(source, url, deja_vus, maintenant - timedelta(days=jours), filtrer=False)
     prioritaires.sort(key=lambda a: a["date"] or maintenant, reverse=True)
     autres = []
     for source, url in FLUX.items():
         autres += _lire_flux(source, url, deja_vus, maintenant - timedelta(hours=heures))
     random.shuffle(autres)
-    return prioritaires + autres
+    # Même article publié sous plusieurs liens (mises à jour d'un direct…) : un seul exemplaire
+    vus, uniques = set(), []
+    for a in prioritaires + autres:
+        cle = re.sub(r"\W+", "", a["titre"].lower())[:60]
+        if cle not in vus:
+            vus.add(cle)
+            uniques.append(a)
+    return uniques

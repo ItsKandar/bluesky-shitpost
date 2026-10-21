@@ -36,10 +36,43 @@ LIMITE_BLUESKY = 300  # caractères
 ID_SUPPRIMER = "marguerite:supprimer:"
 
 
-def selectprompt():
-    promptlist = ['raconte une blague ou tu parles de politique', 'parles de ton amour pour poutou', 'parles de guy debord', 'raconte une blague sur les marxistes']
-    prompt = promptlist[random.randint(0, len(promptlist)-1)]
-    return prompt
+# Sujets des posts hors actualité. Poutou, Debord et les marxistes sont déjà dans sa
+# personnalité : ils restent rares ici pour ne pas revenir à chaque post.
+SUJETS = [
+    ("parles de ton quotidien de précaire (loyer, boulot, fins de mois)", 1),
+    ("parles du travail, des patrons et des open spaces", 1),
+    ("parles de la série québécoise « Le cœur a ses raisons »", 1),
+    ("parles de ta consommation de Monster", 1),
+    ("parles de ta vie de lesbienne trans polyculeuse", 1),
+    ("parles des réseaux sociaux, des influenceurs et de Bluesky", 1),
+    ("parles de l'écologie et des jets privés des riches", 1),
+    ("parles des transports en commun et de la SNCF", 1),
+    ("parles de la culture et des loisirs quand on est fauchée", 1),
+    ("raconte une blague sur la politique française", 1),
+    ("parles de ton amour pour poutou", 0.3),
+    ("parles de guy debord", 0.3),
+    ("raconte une blague sur les marxistes", 0.3),
+]
+
+# Mots et références qui reviennent trop : interdits s'ils sont dans 2 des 6 derniers posts
+TICS = {
+    "spectacl": "le mot « spectacle »",
+    "poutou": "Poutou",
+    "debord": "Debord",
+    "marxis": "les marxistes / le marxisme",
+    "matérialisme historique": "le matérialisme historique",
+    "bourgeois": "le mot « bourgeois »",
+}
+
+
+def tics_a_eviter(derniers_posts):
+    recents = [p.lower() for p in (derniers_posts or [])[-6:]]
+    return [cle for cle in TICS if sum(cle in p for p in recents) >= 2]
+
+
+def selectprompt(eviter=()):
+    sujets = [(s, w) for s, w in SUJETS if not any(t in s.lower() for t in eviter)] or SUJETS
+    return random.choices([s for s, _ in sujets], weights=[w for _, w in sujets])[0]
 
 
 # --- État persistant (plan du jour, derniers posts, articles déjà traités) ---
@@ -97,9 +130,9 @@ def _court(text):
 # angle au shitpost, et elle est recopiée dans le salon de suivi.
 CONSIGNE_ANALYSE = (
     "Réponds avec trois champs.\n"
-    "- analyse : 2 ou 3 phrases, ta lecture politique du sujet depuis ta position (marxiste, "
-    "anticapitaliste, debordienne, féministe, queer). À qui ça profite, quel rapport de classe "
-    "ou de force ça révèle, ce que le discours dominant ou le spectacle cache.\n"
+    "- analyse : 2 ou 3 phrases, ta lecture politique du sujet depuis ta position (anticapitaliste, "
+    "féministe, queer, antiraciste, écolo). À qui ça profite, quel rapport de classe ou de force "
+    "ça révèle, ce que le discours dominant cache. Pars du sujet concret, pas de théorie plaquée.\n"
     "- post : un shitpost de 280 caractères maximum qui fait passer CETTE analyse : la blague sert "
     "l'argument, le lecteur doit comprendre ta critique. Ton brainrot habituel, second degré. "
     "N'invente ni faits, ni chiffres, ni citations : les guillemets « » sont réservés aux "
@@ -172,27 +205,44 @@ def _post_avec_analyse(sujet, derniers_posts=None, passe_possible=False, format_
     """Renvoie (post, analyse), ou (None, None) si le sujet ne s'y prête pas ou après 3 échecs."""
     format_post = format_post or choisir_format(dernier_format)
     consigne = sujet + "\n\n" + CONSIGNE_ANALYSE + consigne_format(format_post, dernier_format)
+    tics = tics_a_eviter(derniers_posts)
+    if tics:
+        consigne += ("\nCes mots et références reviennent trop dans tes derniers posts, n'en utilise "
+                     "aucun : " + ", ".join(TICS[t] for t in tics) + ".")
+    rappel = ""
     for _ in range(3):
         try:
-            r = _demander_post(consigne, derniers_posts)
+            r = _demander_post(consigne + rappel, derniers_posts)
         except (ValueError, StopIteration) as e:
             print(f"[génération] réponse inutilisable : {e}")
             continue
         if r["passe"] and passe_possible:
-            return None, None
+            print("[génération] sujet écarté par le modèle (passe)")
+            return None, "passe"
         post, analyse = r["post"].strip(), r["analyse"].strip()
         if len(post) > 1 and post[0] in '"«' and post[-1] in '"»':
             post = post[1:-1].strip()
-        if _court(post):
+        interdits = [t for t in tics if t in post.lower()]
+        if _court(post) and not interdits:
             print(f"[analyse] {analyse}\n{post}")
             return post, analyse
+        # Le modèle compte mal les caractères : on lui dit de combien il a dépassé
+        if not _court(post):
+            print(f"[génération] post trop long ou vide ({len(post)} caractères), nouvel essai")
+            rappel = (f"\n\nTon essai précédent faisait {len(post)} caractères : beaucoup trop long. "
+                      "Vise 200 caractères (environ 35 mots), une seule idée, coupe tout le reste.")
+        else:
+            print(f"[génération] mot interdit dans le post ({', '.join(interdits)}), nouvel essai")
+            rappel = ("\n\nTon essai précédent employait : " + ", ".join(TICS[t] for t in interdits)
+                      + ". C'est interdit, reformule sans.")
+    print("[génération] échec après 3 essais")
     return None, None
 
 
 # Using claude.ia, this function generates a post for the blog.
 def generate_text(prompt=None, derniers_posts=None, avec_analyse=False, format_post=None, dernier_format=None):
     if prompt is None:
-        prompt = selectprompt()
+        prompt = selectprompt(tics_a_eviter(derniers_posts))
     post, analyse = _post_avec_analyse(f"Sujet : tu {prompt}.", derniers_posts,
                                        format_post=format_post, dernier_format=dernier_format)
     return (post, analyse) if avec_analyse else post
@@ -286,11 +336,21 @@ def preparer_post_auto(etat):
     etat["dernier_format"] = format_post
     if random.random() < PART_ACTU:
         articles = actu.articles_recents(set(etat["liens_vus"]))
+        essais = etat.setdefault("essais", {})
         for article in articles[:4]:
-            etat["liens_vus"].append(article["lien"])
+            print(f"[auto] article : {article['source']} — {article['titre'][:90]}")
             text, analyse = generate_actu(article, derniers, format_post, dernier_format)
+            lien = article["lien"]
             if text:
+                etat["liens_vus"].append(lien)
+                essais.pop(lien, None)
                 return text, article, analyse
+            # Écarté par le modèle, ou source ordinaire : on ne le retente pas.
+            # Source prioritaire en échec : nouvel essai aux créneaux suivants (3 au total).
+            essais[lien] = essais.get(lien, 0) + 1
+            if analyse == "passe" or article["source"] not in actu.PRIORITAIRES or essais[lien] >= 3:
+                etat["liens_vus"].append(lien)
+                essais.pop(lien, None)
         print("[auto] aucune actualité exploitable, repli sur un sujet fixe")
     text, analyse = generate_text(derniers_posts=derniers, avec_analyse=True,
                                   format_post=format_post, dernier_format=dernier_format)
